@@ -1,0 +1,5 @@
+# Example crontab entry for Nigerian News Scraper
+# Run every 10 minutes
+# To install: crontab -e, then add this line
+
+*/10 * * * * /home/sheys/nigerian-news-scraper/run_scraper.sh >> /home/sheys/nigerian-news-scraper/logs/cron.log 2>&1

@@ -1,0 +1,11 @@
+[Unit]
+Description=Nigerian News Scraper Timer
+Requires=scraper.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Unit=scraper.service
+
+[Install]
+WantedBy=timers.target

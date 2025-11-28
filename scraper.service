@@ -1,0 +1,14 @@
+[Unit]
+Description=Nigerian News Twitter Scraper
+After=network.target
+
+[Service]
+Type=oneshot
+User=sheys
+WorkingDirectory=/home/sheys/nigerian-news-scraper
+ExecStart=/home/sheys/nigerian-news-scraper/run_scraper.sh
+StandardOutput=append:/home/sheys/nigerian-news-scraper/logs/systemd.log
+StandardError=append:/home/sheys/nigerian-news-scraper/logs/systemd.log
+
+[Install]
+WantedBy=multi-user.target

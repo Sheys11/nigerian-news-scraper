@@ -1,0 +1,8 @@
+playwright
+aiosqlite
+pandas
+nest_asyncio
+python-dotenv
+fastapi
+uvicorn
+pydantic
