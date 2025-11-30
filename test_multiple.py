@@ -1,13 +1,13 @@
 import asyncio
 import logging
 from playwright.async_api import async_playwright
-from main import scrape_account_tweets, init_database
+from main import scrape_account_tweets, init_database, store_tweets
 
 logging.basicConfig(level=logging.INFO)
 
 async def test_run_multiple():
     print("Initializing DB...")
-    init_database()
+    conn = init_database()
     
     # Select one account from each category for testing
     test_accounts = {
@@ -31,8 +31,13 @@ async def test_run_multiple():
             for category, usernames in test_accounts.items():
                 for username in usernames:
                     print(f"\nTesting scrape for @{username} [{category}]...")
-                    tweets = await scrape_account_tweets(page, username, category, max_tweets=10)
+                    # Pass conn to scrape_account_tweets
+                    tweets = await scrape_account_tweets(page, username, category, conn, max_tweets=10)
                     print(f"Collected {len(tweets)} tweets.")
+                    
+                    if tweets:
+                        store_tweets(conn, tweets)
+                        
                     total_collected += len(tweets)
                     
                     # Wait between accounts
@@ -42,6 +47,7 @@ async def test_run_multiple():
                 
         finally:
             await browser.close()
+            conn.close()
 
 if __name__ == "__main__":
     asyncio.run(test_run_multiple())

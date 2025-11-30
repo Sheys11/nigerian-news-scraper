@@ -6,7 +6,8 @@ Features: Exponential backoff, 60-min time filter, enhanced schema
 
 import asyncio
 from playwright.async_api import async_playwright, Page
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import json
 from datetime import datetime, timedelta
 import logging
@@ -71,65 +72,108 @@ ACCOUNTS = {
 # 2. DATABASE SETUP
 # ============================================================================
 
+def get_db_connection():
+    """Get database connection from DATABASE_URL"""
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        # Fallback to local SQLite for development if no URL provided
+        logger.warning("DATABASE_URL not set, falling back to SQLite 'nigerian_news.db'")
+        import sqlite3
+        return sqlite3.connect("nigerian_news.db")
+    return psycopg2.connect(db_url)
+
 def init_database():
-    """Initialize SQLite database with production schema"""
-    conn = sqlite3.connect("nigerian_news.db")
+    """Initialize database with production schema"""
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Create main tweets table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tweets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tweet_id TEXT UNIQUE NOT NULL,
-            author_username TEXT NOT NULL,
-            author_verified BOOLEAN DEFAULT FALSE,
-            account_category TEXT,
-            text TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            likes INTEGER DEFAULT 0,
-            retweets INTEGER DEFAULT 0,
-            replies INTEGER DEFAULT 0,
-            url TEXT,
-            is_retweet BOOLEAN DEFAULT FALSE,
-            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            processed BOOLEAN DEFAULT FALSE
-        )
-    """)
+    # Check if we are using SQLite or Postgres
+    is_sqlite = hasattr(conn, 'execute') and not hasattr(conn, 'status') # Rough check
     
-    # Create index on timestamp for faster queries
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_timestamp ON tweets(created_at DESC)
-    """)
+    if is_sqlite:
+        # SQLite Schema
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tweets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tweet_id TEXT UNIQUE NOT NULL,
+                author_username TEXT NOT NULL,
+                author_verified BOOLEAN DEFAULT FALSE,
+                account_category TEXT,
+                text TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                likes INTEGER DEFAULT 0,
+                retweets INTEGER DEFAULT 0,
+                replies INTEGER DEFAULT 0,
+                url TEXT,
+                is_retweet BOOLEAN DEFAULT FALSE,
+                ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processed BOOLEAN DEFAULT FALSE
+            )
+        """)
+    else:
+        # PostgreSQL Schema
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tweets (
+                id SERIAL PRIMARY KEY,
+                tweet_id TEXT UNIQUE NOT NULL,
+                author_username TEXT NOT NULL,
+                author_verified BOOLEAN DEFAULT FALSE,
+                account_category TEXT,
+                text TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                likes INTEGER DEFAULT 0,
+                retweets INTEGER DEFAULT 0,
+                replies INTEGER DEFAULT 0,
+                url TEXT,
+                is_retweet BOOLEAN DEFAULT FALSE,
+                ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processed BOOLEAN DEFAULT FALSE
+            )
+        """)
     
-    # Create index on tweet_id for faster lookups
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_tweet_id ON tweets(tweet_id)
-    """)
-    
-    # Migration: Add new columns if they don't exist (for existing databases)
-    try:
-        cursor.execute("ALTER TABLE tweets ADD COLUMN author_verified BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    
-    try:
-        cursor.execute("ALTER TABLE tweets ADD COLUMN ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    except sqlite3.OperationalError:
-        pass
-    
-    try:
-        cursor.execute("ALTER TABLE tweets ADD COLUMN processed BOOLEAN DEFAULT FALSE")
-    except sqlite3.OperationalError:
-        pass
     
     conn.commit()
+    
+    # Create indexes
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON tweets(created_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tweet_id ON tweets(tweet_id)")
+    except Exception as e:
+        logger.warning(f"Error creating indexes: {e}")
+    
+    # Migration: Add new columns if they don't exist
+    columns_to_add = [
+        ("author_verified", "BOOLEAN DEFAULT FALSE"),
+        ("ingested_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("processed", "BOOLEAN DEFAULT FALSE")
+    ]
+    
+    for col_name, col_type in columns_to_add:
+        try:
+            if is_sqlite:
+                cursor.execute(f"ALTER TABLE tweets ADD COLUMN {col_name} {col_type}")
+            else:
+                cursor.execute(f"ALTER TABLE tweets ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+        except Exception:
+            pass # Column likely exists (SQLite throws error if exists)
+            
+    conn.commit()
+    return conn
+
+def get_placeholder(conn):
+    """Return SQL placeholder based on connection type"""
+    # Check if SQLite (has execute but no status)
+    if hasattr(conn, 'execute') and not hasattr(conn, 'status'):
+        return "?"
+    return "%s"
     logger.info("Database initialized successfully")
     return conn
 
 def check_tweet_exists(conn, tweet_id):
     """Check if tweet already exists in database"""
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM tweets WHERE tweet_id = ?", (tweet_id,))
+    ph = get_placeholder(conn)
+    cursor.execute(f"SELECT 1 FROM tweets WHERE tweet_id = {ph}", (tweet_id,))
     return cursor.fetchone() is not None
 
 # ============================================================================
@@ -442,19 +486,37 @@ def enrich_tweets(tweets: list) -> list:
 # ============================================================================
 
 def store_tweets(conn, tweets: list):
-    """Store tweets in SQLite database"""
+    """Store tweets in database"""
     cursor = conn.cursor()
     stored_count = 0
+    ph = get_placeholder(conn)
+    is_sqlite = ph == "?"
     
     for tweet in tweets:
         try:
-            cursor.execute("""
-                INSERT OR REPLACE INTO tweets (
-                    tweet_id, author_username, author_verified, account_category,
-                    text, created_at, likes, retweets, replies,
-                    url, is_retweet, ingested_at, processed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, FALSE)
-            """, (
+            if is_sqlite:
+                query = f"""
+                    INSERT OR REPLACE INTO tweets (
+                        tweet_id, author_username, author_verified, account_category,
+                        text, created_at, likes, retweets, replies,
+                        url, is_retweet, ingested_at, processed
+                    ) VALUES ({', '.join([ph]*13)})
+                """
+            else:
+                query = f"""
+                    INSERT INTO tweets (
+                        tweet_id, author_username, author_verified, account_category,
+                        text, created_at, likes, retweets, replies,
+                        url, is_retweet, ingested_at, processed
+                    ) VALUES ({', '.join([ph]*13)})
+                    ON CONFLICT (tweet_id) DO UPDATE SET
+                        likes = EXCLUDED.likes,
+                        retweets = EXCLUDED.retweets,
+                        replies = EXCLUDED.replies,
+                        processed = FALSE
+                """
+                
+            cursor.execute(query, (
                 tweet["tweet_id"],
                 tweet["author_username"],
                 tweet.get("author_verified", False),
@@ -465,11 +527,16 @@ def store_tweets(conn, tweets: list):
                 tweet["retweets"],
                 tweet["replies"],
                 tweet["url"],
-                tweet["is_retweet"]
+                tweet["is_retweet"],
+                datetime.now(), # ingested_at
+                False # processed
             ))
             stored_count += 1
         except Exception as e:
             logger.error(f"Error storing tweet {tweet['tweet_id']}: {e}")
+            # If Postgres transaction fails, we might need to rollback
+            if not is_sqlite:
+                conn.rollback()
     
     conn.commit()
     logger.info(f"✓ Stored {stored_count} tweets in database")

@@ -7,6 +7,9 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import uvicorn
@@ -31,7 +34,6 @@ app.add_middleware(
 # ============================================================================
 
 class Tweet(BaseModel):
-    id: int
     tweet_id: str
     author_username: str
     author_verified: bool
@@ -59,9 +61,21 @@ class StatsResponse(BaseModel):
 
 def get_db():
     """Get database connection"""
-    conn = sqlite3.connect("nigerian_news.db")
-    conn.row_factory = sqlite3.Row
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        conn = sqlite3.connect("nigerian_news.db")
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
     return conn
+
+def get_placeholder(conn):
+    """Return SQL placeholder based on connection type"""
+    # Check if SQLite (has execute but no status)
+    if hasattr(conn, 'execute') and not hasattr(conn, 'status'):
+        return "?"
+    return "%s"
 
 # ============================================================================
 # API ENDPOINTS
@@ -165,27 +179,35 @@ async def get_tweets(
         conn = get_db()
         cursor = conn.cursor()
         
+        ph = get_placeholder(conn)
+        
         # Build query
-        query = "SELECT * FROM tweets WHERE is_retweet = 0"
-        params = []
+        query = f"SELECT * FROM tweets WHERE is_retweet = {ph}"
+        params = [False]
         
         if category:
-            query += " AND account_category = ?"
+            query += f" AND account_category = {ph}"
             params.append(category)
         
         if author:
-            query += " AND author_username = ?"
+            query += f" AND author_username = {ph}"
             params.append(author)
         
         if hours:
-            query += " AND created_at > datetime('now', ?)"
-            params.append(f'-{hours} hours')
+            # Postgres: created_at > NOW() - INTERVAL 'X hours'
+            # SQLite: created_at > datetime('now', '-X hours')
+            if ph == "?":
+                query += " AND created_at > datetime('now', ?)"
+                params.append(f'-{hours} hours')
+            else:
+                query += " AND created_at > NOW() - INTERVAL %s"
+                params.append(f'{hours} hours')
         
         if min_engagement:
-            query += " AND (likes + retweets + replies) >= ?"
+            query += f" AND (likes + retweets + replies) >= {ph}"
             params.append(min_engagement)
         
-        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        query += f" ORDER BY created_at DESC LIMIT {ph} OFFSET {ph}"
         params.extend([limit, offset])
         
         cursor.execute(query, params)
@@ -195,7 +217,6 @@ async def get_tweets(
         tweets = []
         for row in rows:
             tweets.append(Tweet(
-                id=row['id'],
                 tweet_id=row['tweet_id'],
                 author_username=row['author_username'],
                 author_verified=bool(row['author_verified']),
@@ -224,35 +245,43 @@ async def get_top_tweets(
     try:
         conn = get_db()
         cursor = conn.cursor()
+        ph = get_placeholder(conn)
         
-        query = """
+        # Handle time interval syntax
+        if ph == "?":
+            time_clause = "datetime('now', ?)"
+            time_param = f'-{hours} hours'
+        else:
+            time_clause = "NOW() - INTERVAL %s"
+            time_param = f'{hours} hours'
+            
+        query = f"""
             SELECT * FROM tweets 
-            WHERE is_retweet = 0 
-            AND created_at > datetime('now', ?)
+            WHERE is_retweet = {ph} 
+            AND created_at > {time_clause}
             ORDER BY (likes + retweets + replies) DESC 
-            LIMIT ?
+            LIMIT {ph}
         """
         
-        cursor.execute(query, (f'-{hours} hours', limit))
+        cursor.execute(query, (False, time_param, limit))
         rows = cursor.fetchall()
         conn.close()
         
         tweets = []
         for row in rows:
             tweets.append(Tweet(
-                id=row['id'],
                 tweet_id=row['tweet_id'],
                 author_username=row['author_username'],
                 author_verified=bool(row['author_verified']),
                 account_category=row['account_category'],
                 text=row['text'],
-                created_at=row['created_at'],
+                created_at=str(row['created_at']),
                 likes=row['likes'],
                 retweets=row['retweets'],
                 replies=row['replies'],
                 url=row['url'],
                 is_retweet=bool(row['is_retweet']),
-                ingested_at=row['ingested_at'],
+                ingested_at=str(row['ingested_at']),
                 processed=bool(row['processed'])
             ))
         
@@ -268,34 +297,34 @@ async def get_recent_tweets(
     try:
         conn = get_db()
         cursor = conn.cursor()
+        ph = get_placeholder(conn)
         
-        query = """
+        query = f"""
             SELECT * FROM tweets 
-            WHERE is_retweet = 0 
+            WHERE is_retweet = {ph} 
             ORDER BY created_at DESC 
-            LIMIT ?
+            LIMIT {ph}
         """
         
-        cursor.execute(query, (limit,))
+        cursor.execute(query, (False, limit))
         rows = cursor.fetchall()
         conn.close()
         
         tweets = []
         for row in rows:
             tweets.append(Tweet(
-                id=row['id'],
                 tweet_id=row['tweet_id'],
                 author_username=row['author_username'],
                 author_verified=bool(row['author_verified']),
                 account_category=row['account_category'],
                 text=row['text'],
-                created_at=row['created_at'],
+                created_at=str(row['created_at']),
                 likes=row['likes'],
                 retweets=row['retweets'],
                 replies=row['replies'],
                 url=row['url'],
                 is_retweet=bool(row['is_retweet']),
-                ingested_at=row['ingested_at'],
+                ingested_at=str(row['ingested_at']),
                 processed=bool(row['processed'])
             ))
         
@@ -312,15 +341,16 @@ async def get_tweets_by_category(
     try:
         conn = get_db()
         cursor = conn.cursor()
+        ph = get_placeholder(conn)
         
-        query = """
+        query = f"""
             SELECT * FROM tweets 
-            WHERE account_category = ? AND is_retweet = 0 
+            WHERE account_category = {ph} AND is_retweet = {ph} 
             ORDER BY created_at DESC 
-            LIMIT ?
+            LIMIT {ph}
         """
         
-        cursor.execute(query, (category, limit))
+        cursor.execute(query, (category, False, limit))
         rows = cursor.fetchall()
         conn.close()
         
@@ -330,19 +360,18 @@ async def get_tweets_by_category(
         tweets = []
         for row in rows:
             tweets.append(Tweet(
-                id=row['id'],
                 tweet_id=row['tweet_id'],
                 author_username=row['author_username'],
                 author_verified=bool(row['author_verified']),
                 account_category=row['account_category'],
                 text=row['text'],
-                created_at=row['created_at'],
+                created_at=str(row['created_at']),
                 likes=row['likes'],
                 retweets=row['retweets'],
                 replies=row['replies'],
                 url=row['url'],
                 is_retweet=bool(row['is_retweet']),
-                ingested_at=row['ingested_at'],
+                ingested_at=str(row['ingested_at']),
                 processed=bool(row['processed'])
             ))
         

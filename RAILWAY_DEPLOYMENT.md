@@ -1,11 +1,10 @@
-# Railway Deployment Guide - Nigerian News Scraper
+# Railway Deployment Guide - Nigerian News Scraper (Unified Service)
 
 ## Prerequisites
 - Railway account (sign up at https://railway.app)
 - GitHub account (to connect your repository)
-- Railway CLI (optional but recommended)
 
-## Option 1: Deploy via Railway Dashboard (Recommended)
+## Deployment Steps
 
 ### Step 1: Push Code to GitHub
 ```bash
@@ -14,7 +13,7 @@ cd /home/sheys/nigerian-news-scraper
 # Initialize git if not already done
 git init
 git add .
-git commit -m "Initial commit: Nigerian News Scraper"
+git commit -m "Ready for Railway deployment"
 
 # Create a new repository on GitHub, then:
 git remote add origin https://github.com/YOUR_USERNAME/nigerian-news-scraper.git
@@ -29,160 +28,117 @@ git push -u origin main
 4. Authorize Railway to access your GitHub
 5. Select your `nigerian-news-scraper` repository
 
-### Step 3: Configure the Project
-Railway will auto-detect your project. You need to set up TWO services:
+### Step 3: Add PostgreSQL Database
+1. In Railway dashboard, click **"New"** → **"Database"** → **"PostgreSQL"**
+2. This will create a new Postgres service
+3. Once deployed, click on the Postgres service → **"Variables"**
+4. Copy the `DATABASE_URL`
 
-#### Service 1: Scraper (Cron Job)
-1. In Railway dashboard, click **"New"** → **"Empty Service"**
-2. Name it: `scraper-cron`
-3. Go to **Settings** → **Cron Schedule**
-4. Set schedule: `*/10 * * * *` (every 10 minutes)
-5. Set start command: `python main.py`
-6. Click **"Deploy"**
+### Step 4: Configure Your Service
+1. Click on your main service (the one running your code)
+2. Go to **"Variables"** → **"New Variable"**
+   - Key: `DATABASE_URL`
+   - Value: Paste the Postgres URL
+3. Go to **"Settings"**
+4. Under **"Networking"**, click **"Generate Domain"**
+5. Copy the generated URL (e.g., `https://your-app.up.railway.app`)
 
-#### Service 2: API Gateway
-1. Click **"New"** → **"Empty Service"**
-2. Name it: `api-gateway`
-3. Go to **Settings**
-4. Set start command: `uvicorn api:app --host 0.0.0.0 --port $PORT`
-5. Under **Networking**, click **"Generate Domain"**
-6. Copy the generated URL (e.g., `https://your-app.up.railway.app`)
-7. Click **"Deploy"**
+### Step 5: Deploy
+Railway will automatically deploy using the `railway.toml` configuration, which:
+- Installs dependencies (including Playwright and Chromium)
+- Runs `start.sh` which:
+  - Starts the API server on port $PORT
+  - Runs the scraper immediately
+  - Schedules the scraper to run every 10 minutes
 
-### Step 4: Add Database Volume (Optional)
-For persistent SQLite storage:
-1. In your scraper service, go to **"Volumes"**
-2. Click **"New Volume"**
-3. Mount path: `/app/data`
-4. Update `main.py` to use: `sqlite3.connect("/app/data/nigerian_news.db")`
+### Step 6: Verify Deployment
+1. Check **"Deployments"** tab for build logs
+2. Check **"Logs"** tab for runtime logs
+3. Visit your API at: `https://your-app.up.railway.app/health`
+4. Check the Swagger docs: `https://your-app.up.railway.app/docs`
 
-### Step 5: Monitor Deployment
-- Check **"Deployments"** tab for build logs
-- Check **"Logs"** tab for runtime logs
-- Verify API at: `https://your-app.up.railway.app/health`
+## Testing Your Deployment
 
-## Option 2: Deploy via Railway CLI
-
-### Step 1: Install Railway CLI
+### Check API Health
 ```bash
-npm install -g @railway/cli
+curl https://your-app.up.railway.app/health
 ```
 
-### Step 2: Login
+### Get Stats
 ```bash
-railway login
+curl https://your-app.up.railway.app/stats
 ```
 
-### Step 3: Initialize Project
+### Get Recent Tweets
 ```bash
-cd /home/sheys/nigerian-news-scraper
-railway init
+curl https://your-app.up.railway.app/tweets/recent?limit=10
 ```
 
-### Step 4: Deploy
-```bash
-railway up
-```
+## Monitoring
 
-### Step 5: Set Environment Variables (if needed)
-```bash
-railway variables set KEY=value
-```
+### View Logs
+In Railway dashboard → Your Service → **"Logs"**
 
-### Step 6: Open Dashboard
-```bash
-railway open
-```
-
-## Configuration Files
-
-### Procfile (for Railway)
-Create a `Procfile` in your project root:
-```
-web: uvicorn api:app --host 0.0.0.0 --port $PORT
-worker: python main.py
-```
-
-### railway.toml (Alternative Config)
-Create `railway.toml`:
-```toml
-[build]
-builder = "NIXPACKS"
-
-[deploy]
-startCommand = "uvicorn api:app --host 0.0.0.0 --port $PORT"
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 3
-```
-
-## Post-Deployment
-
-### Test API Endpoints
-```bash
-# Replace with your Railway URL
-RAILWAY_URL="https://your-app.up.railway.app"
-
-# Health check
-curl $RAILWAY_URL/health
-
-# Get stats
-curl $RAILWAY_URL/stats
-
-# Get top tweets
-curl $RAILWAY_URL/tweets/top?limit=10
-```
-
-### Monitor Logs
-```bash
-railway logs
-# Or use the dashboard
-```
+Look for:
+- `Starting API server...` - API is starting
+- `Running initial scrape...` - First scrape on startup
+- `Running scheduled scrape...` - Periodic scrapes (every 10 min)
 
 ### Check Database
-```bash
-railway run sqlite3 nigerian_news.db "SELECT COUNT(*) FROM tweets;"
+In Railway dashboard → PostgreSQL service → **"Data"** tab
+
+You can run SQL queries directly:
+```sql
+SELECT COUNT(*) FROM tweets;
+SELECT * FROM tweets ORDER BY created_at DESC LIMIT 10;
 ```
 
 ## Troubleshooting
 
 ### Build Fails
-- Check `railway logs` for errors
-- Ensure `requirements.txt` is up to date
-- Verify Python version compatibility
+- Check logs for errors
+- Ensure `requirements.txt` is correct
+- Verify Playwright installation in build command
 
-### Playwright Issues
-Railway may need additional setup for Playwright:
-```bash
-# Add to railway.toml
-[build]
-buildCommand = "pip install -r requirements.txt && playwright install-deps && playwright install chromium"
-```
-
-### Database Not Persisting
-- Add a Railway Volume
-- Or use PostgreSQL instead of SQLite:
-  ```bash
-  railway add postgresql
-  ```
+### Scraper Not Running
+- Check logs for Python errors
+- Verify `DATABASE_URL` is set correctly
+- Check if Chromium installed properly
 
 ### API Not Accessible
-- Check if domain is generated under **Networking**
-- Verify PORT environment variable is used: `--port $PORT`
+- Verify domain is generated under **Networking**
+- Check if PORT environment variable is used correctly
+- Ensure service is running (check logs)
+
+### Database Connection Issues
+- Verify `DATABASE_URL` is copied correctly
+- Check PostgreSQL service is running
+- Ensure both services are in the same Railway project
 
 ## Cost Estimate
 - **Hobby Plan**: $5/month (500 hours execution)
 - **Pro Plan**: $20/month (unlimited)
-- Estimated usage: ~720 hours/month (API) + ~72 hours/month (cron)
+- Estimated usage: ~720 hours/month (continuous API + periodic scraper)
 
-## Alternative: Deploy API Only
-If you want to run the scraper locally and only deploy the API:
+## Scaling
 
-1. Deploy only `api.py` to Railway
-2. Run `main.py` locally with cron
-3. Use a shared database (PostgreSQL on Railway)
+### Increase Scraper Frequency
+Edit `start.sh` and change `sleep 600` to a different value:
+- `sleep 300` = 5 minutes
+- `sleep 1800` = 30 minutes
 
-## Next Steps
-1. Set up monitoring/alerting
-2. Add authentication to API
-3. Configure custom domain
-4. Set up CI/CD with GitHub Actions
+### Add More Accounts
+Edit `main.py` and add accounts to the `ACCOUNTS` dictionary.
+
+### Optimize Performance
+- Reduce `TIME_WINDOW_MINUTES` if you only need very recent tweets
+- Adjust `MAX_TWEETS_PER_ACCOUNT` in the scraper logic
+
+## Alternative: Use Railway Cron (Beta)
+Railway now supports native cron jobs. If available:
+1. Create two services:
+   - **API**: `uvicorn api:app --host 0.0.0.0 --port $PORT`
+   - **Scraper**: `python main.py` (with cron schedule `*/10 * * * *`)
+2. Both services share the same `DATABASE_URL`
+
+This approach separates concerns but costs slightly more.
