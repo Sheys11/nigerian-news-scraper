@@ -66,6 +66,26 @@ ACCOUNTS = {
         "Mr_Macaroni", "LayiWasabi", "KusssmanTV", "arojinle1",
         "Morris_Monye", "Wizarab", "Ebuka_Obi_Uchendu",
     ],
+    "policy_governance": [
+        "Oby_Ezekwesili", "seunbakare", "Mr_Aye_Dee", "Ayourb",
+        "seunonigbinde", "BabatundeRosnwo", "Kakandah", "ozzyetomi", "segalinks",
+    ],
+    "economics_business": [
+        "officialNESG", "LindaIkeji", "NigeriaNewsdesk", "instalog9ja",
+    ],
+    "sports": [
+        "Blessed_Kf", "AkibritCioglu", "LERRY",
+    ],
+    "social_critics": [
+        "DanielRegha", "Big_Nenz", "chyddee", "Do2dtun",
+        "TokeMakinwa", "Peterpsquare", "GossipMillTV", "Gistlover",
+    ],
+    "entertainment_culture": [
+        "davido", "PeterObi", "DanBelloComedy", "AbisFulani", "olamide", "heisrema",
+    ],
+    "news_aggregators": [
+        "MobilePunch",
+    ],
 }
 
 # ============================================================================
@@ -241,23 +261,32 @@ async def scrape_account_tweets(page: Page, username: str, category: str, conn, 
     url = f"https://x.com/{username}"
     
     try:
+        # Block heavy resources to speed up loading
+        await page.route("**/*", lambda route: route.abort() 
+            if route.request.resource_type in ["image", "media", "font"] 
+            else route.continue_())
+
         logger.info(f"Navigating to @{username}...")
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         
-        # Wait for tweets to load
+        try:
+            # fast navigation, don't wait for everything
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            logger.warning(f"Navigation timeout for @{username}, checking if content loaded anyway...")
+        
+        # Wait for tweets to load (give it a chance even if goto timed out)
         try:
             await page.wait_for_selector('article', timeout=15000)
         except Exception:
-            logger.warning(f"Timeout waiting for articles on @{username}")
+            logger.warning(f"No articles found on @{username} after loading.")
             return tweets
         
         # Scroll to load more tweets
         previous_height = 0
         tweets_loaded = 0
         consecutive_duplicates = 0
-        old_tweets_count = 0
         
-        while tweets_loaded < max_tweets and old_tweets_count < 10:
+        while tweets_loaded < max_tweets:
             # Get all tweet articles
             articles = await page.query_selector_all('article')
             logger.info(f"  Loaded {len(articles)} articles, extracting...")
@@ -306,7 +335,6 @@ async def scrape_account_tweets(page: Page, username: str, category: str, conn, 
                         
                         # Check if tweet is within time window (60 minutes)
                         if not is_within_time_window(created_at):
-                            old_tweets_count += 1
                             logger.debug(f"Skipping old tweet from @{username}: {time_str}")
                             continue
                         
@@ -343,11 +371,6 @@ async def scrape_account_tweets(page: Page, username: str, category: str, conn, 
                     logger.warning(f"Error extracting tweet: {e}")
                     continue
             
-            # Stop if we've seen too many old tweets
-            if old_tweets_count >= 10:
-                logger.info(f"  Found 10 tweets older than {TIME_WINDOW_MINUTES} minutes. Stopping scrape for @{username}.")
-                break
-            
             # Scroll down to load more
             new_height = await page.evaluate("document.body.scrollHeight")
             if new_height == previous_height:
@@ -374,7 +397,39 @@ async def scrape_all_accounts(accounts_dict: dict, conn) -> list:
     
     async with async_playwright() as p:
         # Launch browser
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+        )
+        
+        # Create context with realistic attributes
+        context = await browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport={'width': 1920, 'height': 1080},
+            locale='en-US',
+            timezone_id='Africa/Lagos',
+            device_scale_factor=1,
+            has_touch=False,
+            is_mobile=False,
+            java_script_enabled=True,
+            permissions=['geolocation'],
+            extra_http_headers={
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-User': '?1',
+                'Sec-Fetch-Dest': 'document',
+            }
+        )
+        
+        # Add init script to hide webdriver property
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
         
         for category, usernames in accounts_dict.items():
             logger.info(f"\n{'='*60}")
