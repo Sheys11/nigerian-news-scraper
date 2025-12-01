@@ -406,10 +406,8 @@ async def main():
             viewport={'width': 1920, 'height': 1080}
         )
         
-        page = await context.new_page()
-        
-        # Apply stealth
-        await Stealth().apply_stealth_async(page)
+        # Apply stealth to context
+        await Stealth().apply_stealth_async(context)
         
         for category, usernames in accounts_dict.items():
             logger.info(f"\n{'='*60}")
@@ -423,12 +421,14 @@ async def main():
                 
                 for attempt in range(max_retries):
                     try:
-                        # Reuse the authenticated/stealth context
-                        # Note: In a long-running scraper, you might want to refresh context occasionally,
-                        # but for now we prioritize keeping the session alive.
+                        # Create a fresh page for each account to avoid closure issues
+                        page = await context.new_page()
                         
                         tweets = await scrape_account_tweets(page, username, category, conn, max_tweets=50)
                         all_tweets.extend(tweets)
+                        
+                        # Close the page after scraping
+                        await page.close()
                         
                         # Reset failure tracker on success
                         failure_tracker[username] = 0
