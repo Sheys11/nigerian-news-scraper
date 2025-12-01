@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 from main import scrape_account_tweets, init_database, store_tweets
 
 logging.basicConfig(level=logging.INFO)
@@ -10,11 +11,13 @@ async def test_run():
     conn = init_database()
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Use Firefox as per best practices
+        browser = await p.firefox.launch(headless=True)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            viewport={'width': 1920, 'height': 1080}
         )
         page = await context.new_page()
+        await Stealth().apply_stealth_async(page)
         
         try:
             username = "channelstv"

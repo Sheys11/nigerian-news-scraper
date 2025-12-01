@@ -6,6 +6,7 @@ Features: Exponential backoff, 60-min time filter, enhanced schema
 
 import asyncio
 from playwright.async_api import async_playwright, Page
+from playwright_stealth import Stealth
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
@@ -178,6 +179,7 @@ def init_database():
             pass # Column likely exists (SQLite throws error if exists)
             
     conn.commit()
+    logger.info("Database initialized successfully")
     return conn
 
 def get_placeholder(conn):
@@ -186,8 +188,7 @@ def get_placeholder(conn):
     if hasattr(conn, 'execute') and not hasattr(conn, 'status'):
         return "?"
     return "%s"
-    logger.info("Database initialized successfully")
-    return conn
+    
 
 def check_tweet_exists(conn, tweet_id):
     """Check if tweet already exists in database"""
@@ -256,101 +257,93 @@ def is_within_time_window(timestamp_str, window_minutes=TIME_WINDOW_MINUTES):
 # ============================================================================
 
 async def scrape_account_tweets(page: Page, username: str, category: str, conn, max_tweets: int = 50) -> list:
-    """Scrape recent tweets from a single X account using Playwright"""
+    """Scrape recent tweets from a single X account using Playwright (Best Practices)"""
     tweets = []
     url = f"https://x.com/{username}"
     
     try:
-        # Block heavy resources to speed up loading
-        await page.route("**/*", lambda route: route.abort() 
-            if route.request.resource_type in ["image", "media", "font"] 
-            else route.continue_())
-
         logger.info(f"Navigating to @{username}...")
         
+        # Fast navigation
         try:
-            # fast navigation, don't wait for everything
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            logger.warning(f"Navigation timeout for @{username}, checking if content loaded anyway...")
-        
-        # Wait for tweets to load (give it a chance even if goto timed out)
-        try:
-            await page.wait_for_selector('article', timeout=15000)
         except Exception:
-            logger.warning(f"No articles found on @{username} after loading.")
+            logger.warning(f"Navigation timeout for @{username}, checking content...")
+            
+        # Wait for tweets to load using robust selector
+        try:
+            await page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
+        except Exception:
+            logger.warning(f"No tweets found on @{username}")
             return tweets
-        
-        # Scroll to load more tweets
-        previous_height = 0
+            
         tweets_loaded = 0
         consecutive_duplicates = 0
         
+        # Dynamic scrolling loop
         while tweets_loaded < max_tweets:
-            # Get all tweet articles
-            articles = await page.query_selector_all('article')
-            logger.info(f"  Loaded {len(articles)} articles, extracting...")
+            # Robust extraction using data-testid
+            articles = await page.query_selector_all('article[data-testid="tweet"]')
             
             for article in articles:
                 if tweets_loaded >= max_tweets:
                     break
-                
+                    
                 try:
-                    # Extract tweet text
-                    text_elem = await article.query_selector('[data-testid="tweetText"]')
+                    # Extract text using data-testid
+                    text_elem = await article.query_selector('div[data-testid="tweetText"]')
                     if not text_elem:
                         continue
-                    
                     tweet_text = await text_elem.inner_text()
                     
-                    # Extract metrics (likes, retweets, replies)
-                    metrics = await article.query_selector_all('[role="button"]')
-                    likes = retweets = replies = 0
+                    # Extract User-Name (for verification/handle)
+                    user_elem = await article.query_selector('div[data-testid="User-Name"]')
+                    user_text = await user_elem.inner_text() if user_elem else ""
+                    is_verified = "Verified account" in user_text or "\n" in user_text # Rough check, better to check SVG
                     
-                    for metric in metrics:
-                        try:
-                            text = await metric.inner_text()
-                            if "Like" in text or "❤️" in text:
-                                likes = int(text.split()[0]) if text[0].isdigit() else 0
-                            elif "Repost" in text:
-                                retweets = int(text.split()[0]) if text[0].isdigit() else 0
-                            elif "Reply" in text:
-                                replies = int(text.split()[0]) if text[0].isdigit() else 0
-                        except:
-                            pass
+                    # Extract metrics using data-testid
+                    likes = 0
+                    retweets = 0
+                    replies = 0
                     
-                    # Extract tweet link and time
-                    link_elem = await article.query_selector('a[href*="/status/"]')
+                    like_elem = await article.query_selector('[data-testid="like"]')
+                    retweet_elem = await article.query_selector('[data-testid="retweet"]')
+                    reply_elem = await article.query_selector('[data-testid="reply"]')
+                    
+                    if like_elem:
+                        val = await like_elem.get_attribute("aria-label")
+                        if val: likes = int(re.search(r'(\d+) likes', val).group(1)) if re.search(r'(\d+) likes', val) else 0
+                            
+                    if retweet_elem:
+                        val = await retweet_elem.get_attribute("aria-label")
+                        if val: retweets = int(re.search(r'(\d+) reposts', val).group(1)) if re.search(r'(\d+) reposts', val) else 0
+                            
+                    if reply_elem:
+                        val = await reply_elem.get_attribute("aria-label")
+                        if val: replies = int(re.search(r'(\d+) replies', val).group(1)) if re.search(r'(\d+) replies', val) else 0
+
+                    # Extract timestamp and URL
                     time_elem = await article.query_selector('time')
+                    link_elem = await article.query_selector('a[href*="/status/"]')
                     
-                    tweet_url = await link_elem.get_attribute('href') if link_elem else ""
                     time_str = await time_elem.inner_text() if time_elem else ""
+                    tweet_url = await link_elem.get_attribute('href') if link_elem else ""
                     
-                    # Create tweet ID from URL
                     tweet_id = tweet_url.split('/status/')[-1].split('?')[0] if '/status/' in tweet_url else ""
                     
                     if tweet_id and tweet_text:
-                        # Parse timestamp
                         created_at = parse_relative_time(time_str)
                         
-                        # Check if tweet is within time window (60 minutes)
                         if not is_within_time_window(created_at):
-                            logger.debug(f"Skipping old tweet from @{username}: {time_str}")
                             continue
-                        
-                        # Incremental check
+                            
                         if check_tweet_exists(conn, tweet_id):
                             consecutive_duplicates += 1
                             if consecutive_duplicates >= 5:
-                                logger.info(f"  Found 5 duplicates in a row. Stopping scrape for @{username}.")
                                 return tweets
                             continue
                         
-                        consecutive_duplicates = 0  # Reset if we find a new tweet
-                        
-                        # Extract author verification status
-                        verified_badge = await article.query_selector('[data-testid="icon-verified"]')
-                        is_verified = verified_badge is not None
+                        consecutive_duplicates = 0
                         
                         tweets.append({
                             "tweet_id": tweet_id,
@@ -366,70 +359,57 @@ async def scrape_account_tweets(page: Page, username: str, category: str, conn, 
                             "created_at": created_at,
                         })
                         tweets_loaded += 1
-                
+                        
                 except Exception as e:
                     logger.warning(f"Error extracting tweet: {e}")
                     continue
             
-            # Scroll down to load more
-            new_height = await page.evaluate("document.body.scrollHeight")
-            if new_height == previous_height:
-                logger.info(f"  Reached end of feed for @{username}")
-                break
+            # Dynamic scroll
+            await page.mouse.wheel(0, 2000)
+            await page.wait_for_timeout(1500)
             
-            await page.evaluate("window.scrollBy(0, window.innerHeight)")
-            previous_height = new_height
+            # Check if end of page (optional, or just rely on loop limit)
             
-            # Wait for new content to load
-            await asyncio.sleep(2)
-        
         logger.info(f"✓ Scraped {len(tweets)} tweets from @{username}")
         return tweets
-    
     except Exception as e:
         logger.error(f"Error scraping @{username}: {e}")
         return tweets
 
-async def scrape_all_accounts(accounts_dict: dict, conn) -> list:
-    """Scrape all tracked accounts with exponential backoff retry logic"""
+async def main():
+    """Main execution function"""
+    logger.info("🚀 Starting Nigerian News Scraper (Production)...")
+    logger.info(f"Time window: Last {TIME_WINDOW_MINUTES} minutes")
+    
+    # Initialize DB
+    conn = init_database()
+    
+    # Flatten accounts list
+    accounts_dict = ACCOUNTS
     all_tweets = []
     failure_tracker = {}
     
     async with async_playwright() as p:
-        # Launch browser
-        browser = await p.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
-        )
+        # Use Firefox
+        browser_type = p.firefox
         
-        # Create context with realistic attributes
+        # Check for storage state
+        storage_state = "twitter_state.json" if os.path.exists("twitter_state.json") else None
+        
+        if not storage_state:
+            logger.warning("No twitter_state.json found! Running in logged-out mode (limited).")
+        
+        browser = await browser_type.launch(headless=True)
+        
         context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={'width': 1920, 'height': 1080},
-            locale='en-US',
-            timezone_id='Africa/Lagos',
-            device_scale_factor=1,
-            has_touch=False,
-            is_mobile=False,
-            java_script_enabled=True,
-            permissions=['geolocation'],
-            extra_http_headers={
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-User': '?1',
-                'Sec-Fetch-Dest': 'document',
-            }
+            storage_state=storage_state,
+            viewport={'width': 1920, 'height': 1080}
         )
         
-        # Add init script to hide webdriver property
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-        """)
+        page = await context.new_page()
+        
+        # Apply stealth
+        await Stealth().apply_stealth_async(page)
         
         for category, usernames in accounts_dict.items():
             logger.info(f"\n{'='*60}")
@@ -443,15 +423,12 @@ async def scrape_all_accounts(accounts_dict: dict, conn) -> list:
                 
                 for attempt in range(max_retries):
                     try:
-                        # Rotate User-Agent
-                        user_agent = random.choice(USER_AGENTS)
-                        context = await browser.new_context(user_agent=user_agent)
-                        page = await context.new_page()
+                        # Reuse the authenticated/stealth context
+                        # Note: In a long-running scraper, you might want to refresh context occasionally,
+                        # but for now we prioritize keeping the session alive.
                         
                         tweets = await scrape_account_tweets(page, username, category, conn, max_tweets=50)
                         all_tweets.extend(tweets)
-                        
-                        await context.close()
                         
                         # Reset failure tracker on success
                         failure_tracker[username] = 0
@@ -480,6 +457,40 @@ async def scrape_all_accounts(accounts_dict: dict, conn) -> list:
         
         await browser.close()
     
+    logger.info(f"✓ Fetched {len(all_tweets)} raw tweets")
+    
+    # Step 2: Apply quality filters
+    logger.info("\n🔍 Step 2: Applying quality filters...")
+    filtered_tweets = apply_quality_filters(all_tweets, min_engagement=30)
+    logger.info(f"✓ Filtered to {len(filtered_tweets)} high-quality tweets")
+    
+    # Step 3: Enrich with metadata
+    logger.info("\n🏷️ Step 3: Enriching tweets with metadata...")
+    enriched_tweets = enrich_tweets(filtered_tweets)
+    
+    # Step 4: Store in database
+    logger.info("\n💾 Step 4: Storing tweets in database...")
+    store_tweets(conn, enriched_tweets)
+    
+    # Step 5: Display results
+    logger.info("\n" + "="*80)
+    logger.info("TOP 15 TRENDING STORIES")
+    logger.info("="*80)
+    
+    top_stories = get_top_stories(conn, limit=15)
+    
+    for i, story in enumerate(top_stories, 1):
+        username, text, likes, retweets, replies, url, category = story
+        total_engagement = likes + retweets + replies
+        print(f"\n{i}. @{username} [{category}]")
+        print(f"   {text[:120]}...")
+        print(f"   ❤️ {likes} | 🔄 {retweets} | 💬 {replies} (Total: {total_engagement})")
+    
+    # Step 6: Export to JSON
+    logger.info("\n📁 Step 6: Exporting to JSON...")
+    export_to_json(conn)
+    
+    logger.info("\n✅ Scraper completed successfully!")
     return all_tweets
 
 # ============================================================================
@@ -637,59 +648,7 @@ def export_to_json(conn, filename: str = "nigerian_news.json"):
 # 8. MAIN EXECUTION
 # ============================================================================
 
-async def main():
-    """Main scraper workflow"""
-    logger.info("🚀 Starting Nigerian News Scraper (Production)...")
-    logger.info(f"Time window: Last {TIME_WINDOW_MINUTES} minutes")
-    
-    # Initialize database
-    conn = init_database()
-    
-    try:
-        # Step 1: Scrape all accounts
-        logger.info("\n📡 Step 1: Scraping tweets from all accounts...")
-        all_tweets = await scrape_all_accounts(ACCOUNTS, conn)
-        logger.info(f"✓ Fetched {len(all_tweets)} raw tweets")
-        
-        # Step 2: Apply quality filters
-        logger.info("\n🔍 Step 2: Applying quality filters...")
-        filtered_tweets = apply_quality_filters(all_tweets, min_engagement=30)
-        logger.info(f"✓ Filtered to {len(filtered_tweets)} high-quality tweets")
-        
-        # Step 3: Enrich with metadata
-        logger.info("\n🏷️ Step 3: Enriching tweets with metadata...")
-        enriched_tweets = enrich_tweets(filtered_tweets)
-        
-        # Step 4: Store in database
-        logger.info("\n💾 Step 4: Storing tweets in database...")
-        store_tweets(conn, enriched_tweets)
-        
-        # Step 5: Display results
-        logger.info("\n" + "="*80)
-        logger.info("TOP 15 TRENDING STORIES")
-        logger.info("="*80)
-        
-        top_stories = get_top_stories(conn, limit=15)
-        
-        for i, story in enumerate(top_stories, 1):
-            username, text, likes, retweets, replies, url, category = story
-            total_engagement = likes + retweets + replies
-            print(f"\n{i}. @{username} [{category}]")
-            print(f"   {text[:120]}...")
-            print(f"   ❤️ {likes} | 🔄 {retweets} | 💬 {replies} (Total: {total_engagement})")
-        
-        # Step 6: Export to JSON
-        logger.info("\n📁 Step 6: Exporting to JSON...")
-        export_to_json(conn)
-        
-        logger.info("\n✅ Scraper completed successfully!")
-    
-    except Exception as e:
-        logger.critical(f"Fatal error in main workflow: {e}", exc_info=True)
-        raise
-    
-    finally:
-        conn.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

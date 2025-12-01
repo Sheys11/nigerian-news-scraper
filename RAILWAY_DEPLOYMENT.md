@@ -6,22 +6,33 @@
 
 ## Deployment Steps
 
-### Step 1: Push Code to GitHub
+### Step 1: Generate Authentication File (CRITICAL)
+Twitter now requires a logged-in session for reliable scraping.
+1. Run the auth setup script locally:
+   ```bash
+   python auth_setup.py
+   ```
+2. A Firefox window will open. Log in to your Twitter account manually.
+3. Press Enter in your terminal.
+4. This will create a `twitter_state.json` file.
+5. **IMPORTANT**: You must include this file in your deployment.
+
+### Step 2: Push Code to GitHub
 ```bash
 cd /home/sheys/nigerian-news-scraper
 
-# Initialize git if not already done
-git init
+# Ensure twitter_state.json is NOT ignored (if you want to commit it)
+# WARNING: This file contains your session cookies. For a private repo, this is okay.
+# For a public repo, you should use Railway Variables or a private gist instead.
 git add .
-git commit -m "Ready for Railway deployment"
+git add twitter_state.json -f
+git commit -m "Ready for Railway with Auth"
 
-# Create a new repository on GitHub, then:
-git remote add origin https://github.com/YOUR_USERNAME/nigerian-news-scraper.git
-git branch -M main
-git push -u origin main
+# Push to GitHub
+git push origin main
 ```
 
-### Step 2: Create Railway Project
+### Step 3: Create Railway Project
 1. Go to https://railway.app/dashboard
 2. Click **"New Project"**
 3. Select **"Deploy from GitHub repo"**
